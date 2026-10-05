@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>3D Wall Runner</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0d0d15;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    }
+    #game-container {
+      display: flex;
+      flex-direction: column;
+      width: 100vw;
+      height: 100vh;
+    }
+    /* 画面上半分: 3Dキャンバス */
+    #canvas-container {
+      width: 100%;
+      height: 50vh;
+      position: relative;
+      background: #000;
+    }
+    #canvas-container canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    #ui-layer {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      right: 10px;
+      display: flex;
+      justify-content: space-between;
+      color: #fff;
+      font-size: 16px;
+      font-weight: bold;
+      text-shadow: 0 0 6px rgba(0, 229, 255, 0.8);
+      pointer-events: none;
+    }
+    #sound-btn {
+      pointer-events: auto;
+      background: rgba(0, 0, 0, 0.5);
+      border: 1px solid #00e5ff;
+      color: #00e5ff;
+      padding: 4px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    #game-over-screen {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(5, 5, 12, 0.85);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: #fff;
+      font-size: 24px;
+      backdrop-filter: blur(4px);
+    }
+    #game-over-screen.hidden {
+      display: none;
+    }
+    #retry-btn {
+      margin-top: 20px;
+      padding: 12px 28px;
+      font-size: 18px;
+      background: #00e5ff;
+      border: none;
+      border-radius: 6px;
+      color: #000;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 0 15px #00e5ff;
+    }
+
+    /* 画面下半分: 3x3 タッチパッド */
+    #touch-container {
+      width: 100%;
+      height: 50vh;
+      background: #12121a;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      touch-action: none;
+      position: relative;
+    }
+    #pad-base {
+      width: 240px;
+      height: 240px;
+      background: rgba(255, 255, 255, 0.03);
+      border: 2px solid #00e5ff;
+      border-radius: 12px;
+      position: relative;
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      grid-template-rows: repeat(3, 1fr);
+      box-shadow: 0 0 20px rgba(0, 229, 255, 0.25);
+    }
+    .grid-cell {
+      border: 1px dashed rgba(0, 229, 255, 0.25);
+      pointer-events: none;
+    }
+    #pad-pointer {
+      width: 26px;
+      height: 26px;
+      background: #00e5ff;
+      border-radius: 50%;
+      position: absolute;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+      box-shadow: 0 0 15px #00e5ff;
+      display: none;
+      top: 50%;
+      left: 50%;
+    }
+  </style>
+  <!-- Three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="game-container">
+  <div id="canvas-container">
+    <div id="ui-layer">
+      <div>
+        <div>SCORE: <span id="score-val">0</span></div>
+        <div style="font-size: 13px; color: #ffaa00;">HIGH: <span id="high-score-val">0</span></div>
+        <div style="font-size: 13px; opacity: 0.8;">TIME: <span id="time-val">0.0</span>s</div>
+      </div>
+      <button id="sound-btn">🔊 SE ON</button>
+    </div>
+    <div id="game-over-screen" class="hidden">
+      <div style="color: #ff0055; font-weight: bold; letter-spacing: 2px;">GAME OVER</div>
+      <div style="font-size: 18px; margin-top: 12px;">SCORE: <span id="final-score">0</span></div>
+      <div style="font-size: 16px; color: #ffaa00; margin-top: 4px;">BEST: <span id="final-high">0</span></div>
+      <button id="retry-btn">RETRY</button>
+    </div>
+  </div>
+  <div id="touch-container">
+    <div id="pad-base">
+      <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+      <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+      <div class="grid-cell"></div><div class="grid-cell"></div><div class="grid-cell"></div>
+      <div id="pad-pointer"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // --- 1. サウンドシステム (Web Audio API) ---
+  class SoundManager {
+    constructor() {
+      this.ctx = null;
+      this.isMuted = false;
+    }
+
+    init() {
+      if (!this.ctx) {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioContext();
+      }
+      if (this.ctx.state === 'suspended') {
+        this.ctx.resume();
+      }
+    }
+
+    // 壁を通り抜けた時の効果音
+    playPass() {
+      if (this.isMuted || !this.ctx) return;
+
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+
+      osc.type = 'sine';
+      // 高めの心地よい音階（880Hz → 1320Hz）
+      osc.frequency.setValueAtTime(880, this.ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(1320, this.ctx.currentTime + 0.08);
+
+      gain.gain.setValueAtTime(0.12, this.ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.08);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+
+      osc.start();
+      osc.stop(this.ctx.currentTime + 0.08);
+    }
+
+    // 激突時の効果音
+    playCrash() {
+      if (this.isMuted || !this.ctx) return;
+
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(150, this.ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(30, this.ctx.currentTime + 0.5);
+
+      gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.5);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+
+      osc.start();
+      osc.stop(this.ctx.currentTime + 0.5);
+    }
+
+    toggleMute() {
+      this.isMuted = !this.isMuted;
+      return !this.isMuted;
+    }
+  }
+
+  const sound = new SoundManager();
+
+  // --- 2. ゲーム定数と状態 ---
+  const GRID_SIZE = 3;
+  const CELL_SPACING = 2.2;
+  const BLOCK_SIZE = 1.65;
+  const PLAYER_SPEED = 24.0;
+  const BOUNDS = 2.2;
+
+  let scene, camera, renderer, player;
+  let walls = [];
+  let isGameOver = false;
+  let score = 0;
+  let highScore = 0;
+  let elapsedTime = 0;
+  let lastSpawnTime = 0;
+  let clock = new THREE.Clock();
+
+  let targetPos = { x: 0, y: 0 };
+  let isTouching = false;
+
+  // 難易度調整
+  const getWallSpeed = () => 12 + elapsedTime * 0.8;
+  const getSpawnInterval = () => Math.max(0.5, 1.6 - elapsedTime * 0.03);
+
+  // --- 3. 初期化 ---
+  function init() {
+    highScore = parseInt(localStorage.getItem('wall_runner_highscore') || '0', 10);
+    document.getElementById('high-score-val').innerText = highScore;
+
+    const container = document.getElementById('canvas-container');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x0d0d15, 0.012);
+
+    camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 200);
+    camera.position.set(0, 1.5, 6);
+    camera.lookAt(0, 0, -10);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(0, 10, 5);
+    scene.add(dirLight);
+
+    // プレイヤー
+    const playerGeo = new THREE.SphereGeometry(0.45, 32, 32);
+    const playerMat = new THREE.MeshStandardMaterial({ 
+      color: 0x00e5ff, 
+      emissive: 0x006688, 
+      roughness: 0.2 
+    });
+    player = new THREE.Mesh(playerGeo, playerMat);
+    player.position.set(0, 0, 0);
+    scene.add(player);
+
+    // トンネル枠線
+    const tunnelGeo = new THREE.BoxGeometry(GRID_SIZE * CELL_SPACING, GRID_SIZE * CELL_SPACING, 200);
+    const tunnelEdges = new THREE.EdgesGeometry(tunnelGeo);
+    const tunnelMat = new THREE.LineBasicMaterial({ color: 0x222244 });
+    const tunnel = new THREE.LineSegments(tunnelEdges, tunnelMat);
+    tunnel.position.z = -90;
+    scene.add(tunnel);
+
+    setupTouchPad();
+
+    const soundBtn = document.getElementById('sound-btn');
+    soundBtn.addEventListener('click', () => {
+      sound.init();
+      const active = sound.toggleMute();
+      soundBtn.innerText = active ? "🔊 SE ON" : "🔇 MUTED";
+    });
+
+    window.addEventListener('resize', onWindowResize);
+    document.getElementById('retry-btn').addEventListener('click', resetGame);
+
+    resetGame();
+    animate();
+  }
+
+  // --- 4. 壁の生成 ---
+  function spawnWall() {
+    const wallGroup = new THREE.Group();
+    wallGroup.position.z = -120;
+
+    const totalCells = GRID_SIZE * GRID_SIZE;
+    const holeCount = Math.floor(Math.random() * 3) + 1;
+    const holes = new Set();
+    while (holes.size < holeCount) {
+      holes.add(Math.floor(Math.random() * totalCells));
+    }
+
+    const blockGeo = new THREE.BoxGeometry(BLOCK_SIZE, BLOCK_SIZE, 0.6);
+    const blockMat = new THREE.MeshStandardMaterial({ 
+      color: 0xff0055, 
+      emissive: 0x550011,
+      roughness: 0.3,
+      transparent: true,
+      opacity: 0.9
+    });
+
+    let index = 0;
+    const blocks = [];
+
+    for (let row = -1; row <= 1; row++) {
+      for (let col = -1; col <= 1; col++) {
+        if (!holes.has(index)) {
+          const block = new THREE.Mesh(blockGeo, blockMat);
+          const x = col * CELL_SPACING;
+          const y = row * CELL_SPACING;
+          block.position.set(x, y, 0);
+          wallGroup.add(block);
+
+          blocks.push({ x, y, size: BLOCK_SIZE / 2 });
+        }
+        index++;
+      }
+    }
+
+    scene.add(wallGroup);
+    walls.push({ mesh: wallGroup, blocks: blocks, passed: false });
+  }
+
+  // --- 5. タッチパッドコントロール ---
+  function setupTouchPad() {
+    const touchContainer = document.getElementById('touch-container');
+    const padBase = document.getElementById('pad-base');
+    const padPointer = document.getElementById('pad-pointer');
+
+    const updatePointerAndTarget = (clientX, clientY) => {
+      sound.init();
+      const rect = padBase.getBoundingClientRect();
+
+      let relX = (clientX - rect.left) / rect.width;
+      let relY = (clientY - rect.top) / rect.height;
+
+      relX = Math.max(0, Math.min(1, relX));
+      relY = Math.max(0, Math.min(1, relY));
+
+      targetPos.x = (relX - 0.5) * 2 * BOUNDS;
+      targetPos.y = -(relY - 0.5) * 2 * BOUNDS;
+
+      padPointer.style.left = `${relX * 100}%`;
+      padPointer.style.top = `${relY * 100}%`;
+      padPointer.style.display = 'block';
+    };
+
+    const handleStart = (clientX, clientY) => {
+      isTouching = true;
+      updatePointerAndTarget(clientX, clientY);
+    };
+
+    const handleMove = (clientX, clientY) => {
+      if (!isTouching) return;
+      updatePointerAndTarget(clientX, clientY);
+    };
+
+    const handleEnd = () => {
+      isTouching = false;
+      padPointer.style.display = 'none';
+    };
+
+    touchContainer.addEventListener('touchstart', (e) => handleStart(e.touches[0].clientX, e.touches[0].clientY));
+    window.addEventListener('touchmove', (e) => {
+      if (e.touches.length > 0 && isTouching) handleMove(e.touches[0].clientX, e.touches[0].clientY);
+    });
+    window.addEventListener('touchend', handleEnd);
+
+    touchContainer.addEventListener('mousedown', (e) => handleStart(e.clientX, e.clientY));
+    window.addEventListener('mousemove', (e) => handleMove(e.clientX, e.clientY));
+    window.addEventListener('mouseup', handleEnd);
+  }
+
+  // --- 6. メインループ ---
+  function animate() {
+    requestAnimationFrame(animate);
+
+    const delta = clock.getDelta();
+
+    if (!isGameOver) {
+      elapsedTime += delta;
+      score += delta * (10 + elapsedTime * elapsedTime * 0.3);
+
+      if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('wall_runner_highscore', Math.floor(highScore));
+      }
+
+      document.getElementById('score-val').innerText = Math.floor(score);
+      document.getElementById('high-score-val').innerText = Math.floor(highScore);
+      document.getElementById('time-val').innerText = elapsedTime.toFixed(1);
+
+      // プレイヤー移動
+      if (isTouching) {
+        const dx = targetPos.x - player.position.x;
+        const dy = targetPos.y - player.position.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > 0.01) {
+          const moveDist = Math.min(dist, PLAYER_SPEED * delta);
+          player.position.x += (dx / dist) * moveDist;
+          player.position.y += (dy / dist) * moveDist;
+        }
+      }
+
+      // 壁の生成と判定
+      if (elapsedTime - lastSpawnTime > getSpawnInterval()) {
+        spawnWall();
+        lastSpawnTime = elapsedTime;
+      }
+
+      const wallSpeed = getWallSpeed();
+      const pR = 0.4;
+
+      for (let i = walls.length - 1; i >= 0; i--) {
+        const wall = walls[i];
+        wall.mesh.position.z += wallSpeed * delta;
+
+        // 衝突判定（プレイヤーと同じ深度にあるとき）
+        if (Math.abs(wall.mesh.position.z - player.position.z) < 0.5) {
+          for (const b of wall.blocks) {
+            const closestX = Math.max(b.x - b.size, Math.min(player.position.x, b.x + b.size));
+            const closestY = Math.max(b.y - b.size, Math.min(player.position.y, b.y + b.size));
+            const distX = player.position.x - closestX;
+            const distY = player.position.y - closestY;
+
+            if ((distX * distX + distY * distY) < (pR * pR)) {
+              triggerGameOver();
+              break;
+            }
+          }
+        }
+
+        // 通過判定（衝突せずプレイヤーの背後へ抜けた瞬間）
+        if (!wall.passed && wall.mesh.position.z > player.position.z + 0.5) {
+          wall.passed = true;
+          sound.playPass();
+        }
+
+        // 画面外消去
+        if (wall.mesh.position.z > 10) {
+          scene.remove(wall.mesh);
+          walls.splice(i, 1);
+        }
+      }
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  function triggerGameOver() {
+    isGameOver = true;
+    sound.playCrash();
+
+    document.getElementById('final-score').innerText = Math.floor(score);
+    document.getElementById('final-high').innerText = Math.floor(highScore);
+    document.getElementById('game-over-screen').classList.remove('hidden');
+  }
+
+  function resetGame() {
+    walls.forEach(w => scene.remove(w.mesh));
+    walls = [];
+
+    score = 0;
+    elapsedTime = 0;
+    lastSpawnTime = 0;
+    isGameOver = false;
+
+    player.position.set(0, 0, 0);
+    targetPos.x = 0;
+    targetPos.y = 0;
+
+    document.getElementById('game-over-screen').classList.add('hidden');
+    clock.start();
+  }
+
+  function onWindowResize() {
+    const container = document.getElementById('canvas-container');
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    camera.aspect = width / height;
+    camera.updateProjectionMatrix();
+    renderer.setSize(width, height);
+  }
+
+  window.onload = init;
+</script>
+</body>
+</html>
